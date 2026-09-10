@@ -1,0 +1,74 @@
+name: Publish PDF dashboard and Allure
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/5 * * * *'
+  push:
+    branches: [main]
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+concurrency:
+  group: reports-pages
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Read public report handoff
+        uses: actions/checkout@v4
+        with:
+          repository: Test-Automation-PTS/playbot-reports
+          ref: gh-pages
+          path: handoff
+          persist-credentials: false
+      - name: Check whether a new report is ready
+        id: changed
+        run: |
+          if [ ! -f handoff/playbot-demo-customer/publication.json ]; then
+            echo "Waiting for the first customer publication"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git show origin/gh-pages:publication.json > "$RUNNER_TEMP/previous-publication.json" 2>/dev/null; then
+            if cmp -s handoff/playbot-demo-customer/publication.json "$RUNNER_TEMP/previous-publication.json"; then
+              echo "Report is already published"
+              echo "ready=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+      - name: Assemble public report site
+        if: steps.changed.outputs.ready == 'true'
+        run: python3 assemble.py handoff/playbot-demo-customer "$RUNNER_TEMP/report-site"
+      - name: Store published reports in this repository
+        if: steps.changed.outputs.ready == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git show-ref --verify --quiet refs/remotes/origin/gh-pages; then
+            git worktree add --detach "$RUNNER_TEMP/published" origin/gh-pages
+          else
+            git worktree add --detach "$RUNNER_TEMP/published" HEAD
+            git -C "$RUNNER_TEMP/published" switch --orphan report-files
+          fi
+          rsync -a --delete --exclude=.git "$RUNNER_TEMP/report-site/" "$RUNNER_TEMP/published/"
+          git -C "$RUNNER_TEMP/published" add -A
+          git -C "$RUNNER_TEMP/published" commit -m "Publish customer report $(python3 -c 'import json;print(json.load(open("handoff/playbot-demo-customer/publication.json"))["run_key"])')"
+          git -C "$RUNNER_TEMP/published" push origin HEAD:gh-pages
+      - uses: actions/configure-pages@v5
+        if: steps.changed.outputs.ready == 'true'
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.changed.outputs.ready == 'true'
+        with:
+          path: ${{ runner.temp }}/report-site
+      - uses: actions/deploy-pages@v4
+        id: deploy
+        if: steps.changed.outputs.ready == 'true'
